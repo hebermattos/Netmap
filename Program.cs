@@ -8,14 +8,14 @@ internal static class Program
 {
     private static async Task Main(string[] args)
     {
-        Console.WriteLine("Netmap - Nmap local network scanner");
+        Console.WriteLine("Netmap - Nmap local network vulnerability scanner");
         Console.WriteLine();
 
         var options = ScanOptions.Parse(args);
 
         Console.WriteLine($"Network range: {options.NetworkRange}");
         Console.WriteLine($"Scan ports:    {(string.IsNullOrWhiteSpace(options.Ports) ? "default" : options.Ports)}");
-        Console.WriteLine($"Vuln scan:     {(options.DetectVulnerabilities ? "enabled" : "disabled")}");
+        Console.WriteLine("Vuln scan:     enabled");
         Console.WriteLine();
 
         try
@@ -40,16 +40,10 @@ internal static class Program
             foreach (var host in hosts)
             {
                 Console.WriteLine("==================================================");
-                Console.WriteLine(options.DetectVulnerabilities
-                    ? $"Scanning vulnerabilities on {host}"
-                    : $"Scanning {host}");
+                Console.WriteLine($"Scanning vulnerabilities on {host}");
                 Console.WriteLine("==================================================");
 
-                if (options.DetectVulnerabilities)
-                    await RunVulnerabilityScanAsync(host, options.Ports);
-                else
-                    await RunStandardScanAsync(host, options.Ports);
-
+                await RunVulnerabilityScanAsync(host, options.Ports);
                 Console.WriteLine();
             }
         }
@@ -78,14 +72,6 @@ internal static class Program
         return ParseLiveHostsFromXml(result.Output);
     }
 
-    private static async Task RunStandardScanAsync(string host, string? ports)
-    {
-        var result = await RunNmapAsync(BuildHostScanArguments(host, ports));
-
-        Console.WriteLine(result.Output);
-        WriteStderrIfPresent(result.Error);
-    }
-
     private static async Task RunVulnerabilityScanAsync(string host, string? ports)
     {
         var result = await RunNmapAsync(BuildVulnerabilityScanArguments(host, ports));
@@ -103,22 +89,6 @@ internal static class Program
 
         PrintVulnerabilityFindings(host, findings);
         WriteStderrIfPresent(result.Error);
-    }
-
-    private static string[] BuildHostScanArguments(string host, string? ports)
-    {
-        var arguments = new List<string>
-        {
-            "-sV",
-            "-Pn",
-            "-T3",
-            "--reason"
-        };
-
-        AddPortsArgument(arguments, ports);
-        arguments.Add(host);
-
-        return arguments.ToArray();
     }
 
     private static string[] BuildVulnerabilityScanArguments(string host, string? ports)
@@ -468,13 +438,12 @@ internal static class Program
         string Status,
         string Output);
 
-    private sealed record ScanOptions(string NetworkRange, string? Ports, bool DetectVulnerabilities)
+    private sealed record ScanOptions(string NetworkRange, string? Ports)
     {
         public static ScanOptions Parse(string[] args)
         {
             string? networkRange = null;
             string? ports = null;
-            var detectVulnerabilities = false;
 
             for (var i = 0; i < args.Length; i++)
             {
@@ -490,7 +459,7 @@ internal static class Program
 
                     case "--vuln":
                     case "--vulnerability-scan":
-                        detectVulnerabilities = true;
+                        // Kept for backward compatibility. Vulnerability scanning is always enabled.
                         break;
 
                     case "-h":
@@ -507,8 +476,7 @@ internal static class Program
 
             return new ScanOptions(
                 networkRange ?? GetFirstLocalNetworkCidr(),
-                ports,
-                detectVulnerabilities);
+                ports);
         }
 
         private static void PrintHelpAndExit()
@@ -517,7 +485,6 @@ internal static class Program
             Console.WriteLine("  dotnet run");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080");
-            Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ports 80,443 --vuln");
             Environment.Exit(0);
         }
     }
