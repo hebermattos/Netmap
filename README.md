@@ -1,6 +1,6 @@
 # Netmap
 
-C#/.NET 8 console app that discovers live hosts on the local network using Nmap and then runs either a standard service scan or a vulnerability scan against each discovered IP address.
+C#/.NET 8 console app that discovers live hosts on the local network using Nmap and then runs a vulnerability-focused scan against each discovered IP address.
 
 ## Requirements
 
@@ -21,16 +21,10 @@ Manually provide the network range:
 dotnet run -- --network 192.168.0.0/24
 ```
 
-Limit the standard scan to specific ports:
+Limit the scan to specific ports:
 
 ```bash
 dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080
-```
-
-Run vulnerability detection by IP and port using Nmap `vuln` scripts:
-
-```bash
-dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080 --vuln
 ```
 
 You can also pass the network range as the first argument:
@@ -39,42 +33,11 @@ You can also pass the network range as the first argument:
 dotnet run -- 192.168.0.0/24
 ```
 
-## Standard scan flow
+The `--vuln` and `--vulnerability-scan` flags are still accepted for backward compatibility, but they are no longer required because this scan mode is always enabled.
 
-1. Runs host discovery with:
+## Output
 
-```bash
-nmap -sn -oX - <network>
-```
-
-2. Reads the `up` hosts from the XML returned by Nmap.
-3. For each discovered IP address, runs:
-
-```bash
-nmap -sV -Pn -T3 --reason <ip>
-```
-
-With specific ports:
-
-```bash
-nmap -sV -Pn -T3 --reason -p 80,443 <ip>
-```
-
-## Vulnerability scan flow
-
-When `--vuln` or `--vulnerability-scan` is provided, Netmap runs this command for each discovered IP address:
-
-```bash
-nmap -sV -Pn -T3 --reason --script vuln -oX - <ip>
-```
-
-With specific ports:
-
-```bash
-nmap -sV -Pn -T3 --reason --script vuln -oX - -p 80,443 <ip>
-```
-
-The application parses the XML output and prints findings grouped by:
+The application groups findings by IP address, protocol, port, and detected service:
 
 ```text
 IP protocol/port service
@@ -84,11 +47,11 @@ IP protocol/port service
 
 Statuses:
 
-- `VULNERABLE`: the script output indicates a vulnerable or exploitable state.
-- `REVIEW`: the script returned CVE or vulnerability-related output that should be manually reviewed.
+- `VULNERABLE`: the scan output indicates a vulnerable or exploitable state.
+- `REVIEW`: the scan returned CVE or vulnerability-related output that should be manually reviewed.
 
-Outputs that clearly state `not vulnerable`, `not affected`, or similar negative results are suppressed to keep the report focused.
+Negative results such as `not vulnerable` or `not affected` are suppressed to keep the report focused.
 
 ## Notes
 
-Use this tool only on networks and devices where you have authorization. Nmap `vuln` scripts can be slower and more intrusive than a regular service scan.
+Use this tool only on networks and devices where you have authorization. Vulnerability-focused scans can be slower and more intrusive than regular service discovery.
