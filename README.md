@@ -1,59 +1,59 @@
 # Netmap
 
-Console app em C#/.NET 8 para descobrir hosts ativos na rede local usando Nmap e executar um scan em cada IP encontrado.
+C#/.NET 8 console app that discovers live hosts on the local network using Nmap and then runs a scan against each discovered IP address.
 
-## Requisitos
+## Requirements
 
 - .NET 8 SDK
-- Nmap instalado e disponível no `PATH`
+- Nmap installed and available in `PATH`
 
-## Uso
+## Usage
 
-Detectar automaticamente a primeira rede IPv4 local e escanear os hosts encontrados:
+Automatically detect the first local IPv4 network and scan the discovered hosts:
 
 ```bash
 dotnet run
 ```
 
-Informar a rede manualmente:
+Manually provide the network range:
 
 ```bash
 dotnet run -- --network 192.168.0.0/24
 ```
 
-Limitar o scan a portas específicas:
+Limit the scan to specific ports:
 
 ```bash
 dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080
 ```
 
-Também é possível passar a rede como primeiro argumento:
+You can also pass the network range as the first argument:
 
 ```bash
 dotnet run -- 192.168.0.0/24
 ```
 
-## Fluxo
+## Flow
 
-1. Executa discovery com:
+1. Runs host discovery with:
 
 ```bash
-nmap -sn -oX - <rede>
+nmap -sn -oX - <network>
 ```
 
-2. Lê os hosts `up` do XML retornado pelo Nmap.
-3. Para cada IP encontrado, executa:
+2. Reads the `up` hosts from the XML returned by Nmap.
+3. For each discovered IP address, runs:
 
 ```bash
 nmap -sV -Pn -T3 --reason <ip>
 ```
 
-Com portas específicas:
+With specific ports:
 
 ```bash
 nmap -sV -Pn -T3 --reason -p 80,443 <ip>
 ```
 
-## Observação
+## Notes
 
-Use somente em redes e dispositivos onde você tem autorização.
+Use this tool only on networks and devices where you have authorization.
