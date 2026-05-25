@@ -6,6 +6,20 @@ using System.Xml.Linq;
 
 internal static class Program
 {
+    private static readonly string[] TargetedValidationScripts =
+    [
+        "ssl-cert",
+        "ssl-enum-ciphers",
+        "http-title",
+        "http-headers",
+        "http-security-headers",
+        "ssh2-enum-algos",
+        "smb-protocols",
+        "smb2-security-mode",
+        "ftp-anon",
+        "ftp-syst"
+    ];
+
     private static async Task Main(string[] args)
     {
         Console.WriteLine("Netmap - Nmap local network vulnerability scanner");
@@ -16,6 +30,7 @@ internal static class Program
         Console.WriteLine($"Network range: {options.NetworkRange}");
         Console.WriteLine($"Scan ports:    {(string.IsNullOrWhiteSpace(options.Ports) ? "default" : options.Ports)}");
         Console.WriteLine("Vuln scan:     enabled");
+        Console.WriteLine("Validation:    enabled");
         Console.WriteLine();
 
         try
@@ -43,7 +58,9 @@ internal static class Program
                 Console.WriteLine($"Scanning vulnerabilities on {host}");
                 Console.WriteLine("==================================================");
 
-                await RunVulnerabilityScanAsync(host, options.Ports);
+                var openPorts = await RunVulnerabilityScanAsync(host, options.Ports);
+                await RunTargetedValidationAsync(host, openPorts);
+
                 Console.WriteLine();
             }
         }
@@ -72,7 +89,7 @@ internal static class Program
         return ParseLiveHostsFromXml(result.Output);
     }
 
-    private static async Task RunVulnerabilityScanAsync(string host, string? ports)
+    private static async Task<IReadOnlyList<OpenPortInfo>> RunVulnerabilityScanAsync(string host, string? ports)
     {
         var result = await RunNmapAsync(BuildVulnerabilityScanArguments(host, ports));
 
@@ -80,14 +97,47 @@ internal static class Program
         {
             Console.WriteLine("Nmap vulnerability scan failed.");
             WriteStderrIfPresent(result.Error);
-            return;
+            return [];
         }
 
         var findings = ParseVulnerabilityFindingsFromXml(result.Output)
             .Where(finding => finding.IpAddress == host)
             .ToList();
 
+        var openPorts = ParseOpenPortsFromXml(result.Output)
+            .Where(port => port.IpAddress == host)
+            .ToList();
+
         PrintVulnerabilityFindings(host, findings);
+        WriteStderrIfPresent(result.Error);
+
+        return openPorts;
+    }
+
+    private static async Task RunTargetedValidationAsync(string host, IReadOnlyList<OpenPortInfo> openPorts)
+    {
+        Console.WriteLine("Targeted validation evidence:");
+
+        if (openPorts.Count == 0)
+        {
+            Console.WriteLine($"  No open ports available for targeted validation on {host}.");
+            return;
+        }
+
+        var result = await RunNmapAsync(BuildTargetedValidationArguments(host, openPorts));
+
+        if (result.ExitCode != 0)
+        {
+            Console.WriteLine("  Nmap targeted validation failed.");
+            WriteStderrIfPresent(result.Error);
+            return;
+        }
+
+        var evidence = ParseValidationEvidenceFromXml(result.Output)
+            .Where(item => item.IpAddress == host)
+            .ToList();
+
+        PrintValidationEvidence(host, evidence);
         WriteStderrIfPresent(result.Error);
     }
 
@@ -101,6 +151,33 @@ internal static class Program
             "--reason",
             "--script",
             "vuln",
+            "-oX",
+            "-"
+        };
+
+        AddPortsArgument(arguments, ports);
+        arguments.Add(host);
+
+        return arguments.ToArray();
+    }
+
+    private static string[] BuildTargetedValidationArguments(string host, IReadOnlyList<OpenPortInfo> openPorts)
+    {
+        var ports = string.Join(",", openPorts
+            .Where(port => string.Equals(port.Protocol, "tcp", StringComparison.OrdinalIgnoreCase))
+            .Select(port => port.PortLabel)
+            .Where(port => int.TryParse(port, out _))
+            .Distinct()
+            .OrderBy(ParsePortForOrdering));
+
+        var arguments = new List<string>
+        {
+            "-sV",
+            "-Pn",
+            "-T3",
+            "--reason",
+            "--script",
+            string.Join(",", TargetedValidationScripts),
             "-oX",
             "-"
         };
@@ -166,6 +243,34 @@ internal static class Program
             .ToList();
     }
 
+    private static IReadOnlyList<OpenPortInfo> ParseOpenPortsFromXml(string xml)
+    {
+        var document = XDocument.Parse(xml);
+        var openPorts = new List<OpenPortInfo>();
+
+        foreach (var host in document.Descendants("host"))
+        {
+            var ipAddress = GetHostIpAddress(host);
+            if (ipAddress is null)
+                continue;
+
+            foreach (var port in host.Descendants("port"))
+            {
+                var state = port.Element("state")?.Attribute("state")?.Value;
+                if (!string.Equals(state, "open", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                openPorts.Add(new OpenPortInfo(
+                    ipAddress,
+                    port.Attribute("portid")?.Value ?? "unknown",
+                    port.Attribute("protocol")?.Value ?? "tcp",
+                    FormatService(port.Element("service"))));
+            }
+        }
+
+        return openPorts;
+    }
+
     private static IReadOnlyList<VulnerabilityFinding> ParseVulnerabilityFindingsFromXml(string xml)
     {
         var document = XDocument.Parse(xml);
@@ -212,6 +317,49 @@ internal static class Program
         }
 
         return findings;
+    }
+
+    private static IReadOnlyList<ValidationEvidence> ParseValidationEvidenceFromXml(string xml)
+    {
+        var document = XDocument.Parse(xml);
+        var evidence = new List<ValidationEvidence>();
+
+        foreach (var host in document.Descendants("host"))
+        {
+            var ipAddress = GetHostIpAddress(host);
+            if (ipAddress is null)
+                continue;
+
+            foreach (var port in host.Descendants("port"))
+            {
+                var state = port.Element("state")?.Attribute("state")?.Value;
+                if (!string.Equals(state, "open", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var protocol = port.Attribute("protocol")?.Value ?? "tcp";
+                var portId = port.Attribute("portid")?.Value ?? "unknown";
+                var service = FormatService(port.Element("service"));
+
+                foreach (var script in port.Elements("script"))
+                {
+                    var scriptId = script.Attribute("id")?.Value ?? "unknown-script";
+                    var output = NormalizeOutput(script.Attribute("output")?.Value);
+
+                    if (string.IsNullOrWhiteSpace(output))
+                        continue;
+
+                    evidence.Add(new ValidationEvidence(
+                        ipAddress,
+                        portId,
+                        protocol,
+                        service,
+                        scriptId,
+                        output));
+                }
+            }
+        }
+
+        return evidence;
     }
 
     private static void AddFindingIfRelevant(
@@ -300,6 +448,39 @@ internal static class Program
             {
                 Console.WriteLine($"  [{finding.Status}] {finding.ScriptId}");
                 WriteIndented(finding.Output, "    ");
+            }
+
+            Console.WriteLine();
+        }
+    }
+
+    private static void PrintValidationEvidence(string host, IReadOnlyList<ValidationEvidence> evidence)
+    {
+        var hostEvidence = evidence
+            .OrderBy(item => ParsePortForOrdering(item.PortLabel))
+            .ThenBy(item => item.ScriptId)
+            .ToList();
+
+        if (hostEvidence.Count == 0)
+        {
+            Console.WriteLine($"  No targeted validation evidence reported for {host}.");
+            return;
+        }
+
+        foreach (var portGroup in hostEvidence.GroupBy(item => new
+        {
+            item.IpAddress,
+            item.PortLabel,
+            item.Protocol,
+            item.Service
+        }))
+        {
+            Console.WriteLine($"{portGroup.Key.IpAddress} {portGroup.Key.Protocol}/{portGroup.Key.PortLabel} {portGroup.Key.Service}");
+
+            foreach (var item in portGroup)
+            {
+                Console.WriteLine($"  [EVIDENCE] {item.ScriptId}");
+                WriteIndented(item.Output, "    ");
             }
 
             Console.WriteLine();
@@ -429,6 +610,12 @@ internal static class Program
 
     private sealed record NmapResult(int ExitCode, string Output, string Error);
 
+    private sealed record OpenPortInfo(
+        string IpAddress,
+        string PortLabel,
+        string Protocol,
+        string Service);
+
     private sealed record VulnerabilityFinding(
         string IpAddress,
         string PortLabel,
@@ -436,6 +623,14 @@ internal static class Program
         string Service,
         string ScriptId,
         string Status,
+        string Output);
+
+    private sealed record ValidationEvidence(
+        string IpAddress,
+        string PortLabel,
+        string Protocol,
+        string Service,
+        string ScriptId,
         string Output);
 
     private sealed record ScanOptions(string NetworkRange, string? Ports)
