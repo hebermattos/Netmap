@@ -1,6 +1,6 @@
 # Netmap
 
-C#/.NET 8 console app that discovers live hosts on the local network using Nmap and then runs a vulnerability-focused scan against each discovered IP address.
+C#/.NET 8 console app that discovers live hosts on the local network using Nmap, runs vulnerability-focused checks, and then collects targeted validation evidence for open services.
 
 ## Requirements
 
@@ -37,7 +37,11 @@ The `--vuln` and `--vulnerability-scan` flags are still accepted for backward co
 
 ## Output
 
-The application groups findings by IP address, protocol, port, and detected service:
+Netmap prints two main sections per host.
+
+### Vulnerability findings
+
+Findings are grouped by IP address, protocol, port, and detected service:
 
 ```text
 IP protocol/port service
@@ -51,6 +55,29 @@ Statuses:
 - `REVIEW`: the scan returned CVE or vulnerability-related output that should be manually reviewed.
 
 Negative results such as `not vulnerable` or `not affected` are suppressed to keep the report focused.
+
+### Targeted validation evidence
+
+After the vulnerability-focused scan, Netmap runs a second validation pass against the open TCP ports found for that host.
+
+It uses service-oriented scripts for common protocols, including:
+
+- TLS/SSL: certificate and cipher information
+- HTTP/HTTPS: title, headers, and security headers
+- SSH: supported algorithms
+- SMB: protocol and security mode information
+- FTP: service information and anonymous access indication
+
+Validation evidence is printed as:
+
+```text
+Targeted validation evidence:
+IP protocol/port service
+  [EVIDENCE] script-id
+    script output
+```
+
+This section is intended to help confirm service configuration and collect technical evidence without relying only on generic vulnerability output.
 
 ## Notes
 
