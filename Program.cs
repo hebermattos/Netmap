@@ -1,12 +1,18 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http.Json;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
+using System.Text.Json.Serialization;
 using System.Xml.Linq;
 
 internal static class Program
 {
     private const int DefaultParallelism = 5;
+    private const int MaxOllamaReportCharacters = 60_000;
+    private const string DefaultOllamaUrl = "http://localhost:11434";
 
     private static readonly string[] TargetedValidationScripts =
     [
@@ -32,6 +38,7 @@ internal static class Program
         Console.WriteLine($"Network range: {options.NetworkRange}");
         Console.WriteLine($"Scan ports:    {(string.IsNullOrWhiteSpace(options.Ports) ? "default" : options.Ports)}");
         Console.WriteLine($"Parallelism:   {options.Parallelism}");
+        Console.WriteLine($"Ollama:        {(options.HasOllamaAnalysis ? $"enabled ({options.OllamaModel})" : "disabled")}");
         Console.WriteLine("Vuln scan:     enabled");
         Console.WriteLine("Validation:    enabled");
         Console.WriteLine();
@@ -58,6 +65,7 @@ internal static class Program
             Console.WriteLine();
 
             var consoleLock = new object();
+            var hostReports = new ConcurrentDictionary<string, string>();
             var parallelOptions = new ParallelOptions
             {
                 MaxDegreeOfParallelism = options.Parallelism
@@ -66,12 +74,22 @@ internal static class Program
             await Parallel.ForEachAsync(hosts, parallelOptions, async (host, _) =>
             {
                 var report = await ScanHostAsync(host, options.Ports);
+                hostReports[host] = report;
 
                 lock (consoleLock)
                 {
                     Console.Write(report);
                 }
             });
+
+            if (options.HasOllamaAnalysis)
+            {
+                var fullReport = string.Join(
+                    Environment.NewLine,
+                    hosts.Select(host => hostReports.TryGetValue(host, out var report) ? report : string.Empty));
+
+                await RunOllamaDefensiveAnalysisAsync(options, fullReport);
+            }
         }
         catch (Exception ex)
         {
@@ -94,6 +112,92 @@ internal static class Program
         writer.WriteLine();
 
         return writer.ToString();
+    }
+
+    private static async Task RunOllamaDefensiveAnalysisAsync(ScanOptions options, string report)
+    {
+        Console.WriteLine("==================================================");
+        Console.WriteLine("Local Ollama defensive analysis");
+        Console.WriteLine("==================================================");
+
+        if (string.IsNullOrWhiteSpace(report))
+        {
+            Console.WriteLine("No scan report content available for Ollama analysis.");
+            return;
+        }
+
+        var prompt = BuildDefensiveAnalysisPrompt(report);
+        var request = new OllamaGenerateRequest(options.OllamaModel!, prompt, Stream: false);
+
+        try
+        {
+            using var httpClient = new HttpClient
+            {
+                BaseAddress = new Uri(options.OllamaUrl),
+                Timeout = TimeSpan.FromMinutes(10)
+            };
+
+            using var response = await httpClient.PostAsJsonAsync("/api/generate", request);
+            var responseText = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"Ollama request failed with HTTP {(int)response.StatusCode}.");
+                Console.WriteLine(responseText);
+                return;
+            }
+
+            var ollamaResponse = System.Text.Json.JsonSerializer.Deserialize<OllamaGenerateResponse>(responseText);
+
+            if (string.IsNullOrWhiteSpace(ollamaResponse?.Response))
+            {
+                Console.WriteLine("Ollama returned an empty response.");
+                return;
+            }
+
+            Console.WriteLine(ollamaResponse.Response.Trim());
+        }
+        catch (HttpRequestException ex)
+        {
+            Console.WriteLine($"Could not connect to Ollama at {options.OllamaUrl}: {ex.Message}");
+        }
+        catch (TaskCanceledException ex)
+        {
+            Console.WriteLine($"Ollama analysis timed out: {ex.Message}");
+        }
+    }
+
+    private static string BuildDefensiveAnalysisPrompt(string report)
+    {
+        var truncatedReport = TruncateReportForPrompt(report);
+        var prompt = new StringBuilder();
+
+        prompt.AppendLine("You are a defensive security analyst reviewing an authorized internal network scan.");
+        prompt.AppendLine("Keep the response focused on triage, risk, evidence, validation, hardening, patching, and monitoring.");
+        prompt.AppendLine("Return:");
+        prompt.AppendLine("1. Executive summary");
+        prompt.AppendLine("2. Highest-risk hosts and services");
+        prompt.AppendLine("3. Likely exposure and business impact");
+        prompt.AppendLine("4. Safe validation checks");
+        prompt.AppendLine("5. Recommended remediation actions, ordered by priority");
+        prompt.AppendLine("6. Follow-up evidence to collect");
+        prompt.AppendLine();
+        prompt.AppendLine("Nmap report:");
+        prompt.AppendLine("```text");
+        prompt.AppendLine(truncatedReport);
+        prompt.AppendLine("```");
+
+        return prompt.ToString();
+    }
+
+    private static string TruncateReportForPrompt(string report)
+    {
+        if (report.Length <= MaxOllamaReportCharacters)
+            return report;
+
+        return report[..MaxOllamaReportCharacters] +
+               Environment.NewLine +
+               "[Report truncated before sending to Ollama because it exceeded the local prompt size limit.]";
     }
 
     private static void EnsureNmapIsAvailable()
@@ -658,12 +762,29 @@ internal static class Program
         string ScriptId,
         string Output);
 
-    private sealed record ScanOptions(string NetworkRange, string? Ports, int Parallelism)
+    private sealed record OllamaGenerateRequest(
+        [property: JsonPropertyName("model")] string Model,
+        [property: JsonPropertyName("prompt")] string Prompt,
+        [property: JsonPropertyName("stream")] bool Stream);
+
+    private sealed record OllamaGenerateResponse(
+        [property: JsonPropertyName("response")] string? Response);
+
+    private sealed record ScanOptions(
+        string NetworkRange,
+        string? Ports,
+        int Parallelism,
+        string? OllamaModel,
+        string OllamaUrl)
     {
+        public bool HasOllamaAnalysis => !string.IsNullOrWhiteSpace(OllamaModel);
+
         public static ScanOptions Parse(string[] args)
         {
             string? networkRange = null;
             string? ports = null;
+            string? ollamaModel = null;
+            var ollamaUrl = DefaultOllamaUrl;
             var parallelism = DefaultParallelism;
 
             for (var i = 0; i < args.Length; i++)
@@ -680,6 +801,14 @@ internal static class Program
 
                     case "--parallelism" when i + 1 < args.Length:
                         parallelism = ParseParallelism(args[++i]);
+                        break;
+
+                    case "--ollama-model" when i + 1 < args.Length:
+                        ollamaModel = args[++i];
+                        break;
+
+                    case "--ollama-url" when i + 1 < args.Length:
+                        ollamaUrl = NormalizeOllamaUrl(args[++i]);
                         break;
 
                     case "--vuln":
@@ -702,7 +831,9 @@ internal static class Program
             return new ScanOptions(
                 networkRange ?? GetFirstLocalNetworkCidr(),
                 ports,
-                parallelism);
+                parallelism,
+                ollamaModel,
+                ollamaUrl);
         }
 
         private static int ParseParallelism(string value)
@@ -713,6 +844,14 @@ internal static class Program
             throw new ArgumentException("The --parallelism value must be a positive integer.");
         }
 
+        private static string NormalizeOllamaUrl(string value)
+        {
+            if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
+                throw new ArgumentException("The --ollama-url value must be an absolute URL, for example http://localhost:11434.");
+
+            return uri.ToString().TrimEnd('/');
+        }
+
         private static void PrintHelpAndExit()
         {
             Console.WriteLine("Usage:");
@@ -720,6 +859,8 @@ internal static class Program
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --parallelism 5");
+            Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ollama-model llama3.1");
+            Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ollama-url http://localhost:11434 --ollama-model llama3.1");
             Environment.Exit(0);
         }
     }
