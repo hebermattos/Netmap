@@ -1,6 +1,6 @@
 # Netmap
 
-C#/.NET 8 console app that discovers live hosts on the local network using Nmap, runs vulnerability-focused checks, collects targeted validation evidence for open services, and sends the final report to a local Ollama model for defensive triage and remediation guidance.
+C#/.NET 8 console app that discovers live hosts on the local network using Nmap, runs vulnerability-focused checks, collects targeted validation evidence for open services, prints a final vulnerability summary, and sends the final report to a local Ollama model for defensive triage and remediation guidance.
 
 ## Requirements
 
@@ -126,7 +126,7 @@ Large reports are truncated before being sent to Ollama to avoid oversized local
 
 ## Output
 
-Netmap prints two main sections per host.
+Netmap prints the detailed Nmap-derived sections per host, then a final consolidated vulnerability summary.
 
 ### Vulnerability findings
 
@@ -167,6 +167,29 @@ IP protocol/port service
 ```
 
 This section is intended to help confirm service configuration and collect technical evidence without relying only on generic vulnerability output.
+
+### Final vulnerability summary
+
+At the end of the scan, Netmap prints a consolidated summary with host, port, service, status, script id, and the first detail line for each finding:
+
+```text
+Final vulnerability summary
+Host: 192.168.0.10
+  tcp/443 - https nginx 1.18.0
+    [REVIEW] ssl-ccs-injection: No vulnerable configuration detected
+
+Host: 192.168.0.20
+  tcp/80 - http Apache httpd
+    [VULNERABLE] http-vuln-example: Example finding details
+```
+
+If no relevant findings are reported by Nmap vuln scripts, the summary prints:
+
+```text
+No vulnerability findings were reported by Nmap vuln scripts.
+```
+
+The final summary is also included in the report sent to Ollama.
 
 ## Notes
 
