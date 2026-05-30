@@ -1,11 +1,12 @@
 # Netmap
 
-C#/.NET 8 console app that discovers live hosts on the local network using Nmap, runs vulnerability-focused checks, and then collects targeted validation evidence for open services.
+C#/.NET 8 console app that discovers live hosts on the local network using Nmap, runs vulnerability-focused checks, collects targeted validation evidence for open services, and can optionally send the final report to a local Ollama model for defensive triage and remediation guidance.
 
 ## Requirements
 
 - .NET 8 SDK
 - Nmap installed and available in `PATH`
+- Optional: Ollama running locally when using `--ollama-model`
 
 ## Usage
 
@@ -33,10 +34,22 @@ Control how many hosts are analyzed in parallel:
 dotnet run -- --network 192.168.0.0/24 --parallelism 5
 ```
 
+Send the completed scan report to a local Ollama model for defensive analysis:
+
+```bash
+dotnet run -- --network 192.168.0.0/24 --ollama-model llama3.1
+```
+
+Use a custom Ollama URL:
+
+```bash
+dotnet run -- --network 192.168.0.0/24 --ollama-url http://localhost:11434 --ollama-model llama3.1
+```
+
 You can combine the options:
 
 ```bash
-dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080 --parallelism 3
+dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080 --parallelism 3 --ollama-model llama3.1
 ```
 
 You can also pass the network range as the first argument:
@@ -48,6 +61,27 @@ dotnet run -- 192.168.0.0/24
 The default parallelism is `5`. Increase it carefully. Higher values run more Nmap processes at the same time and can make scans faster, but they also create more traffic and CPU usage.
 
 The `--vuln` and `--vulnerability-scan` flags are still accepted for backward compatibility, but they are no longer required because this scan mode is always enabled.
+
+## Ollama analysis
+
+When `--ollama-model` is provided, Netmap sends the generated Nmap report to Ollama after all host scans finish.
+
+Default Ollama endpoint:
+
+```text
+http://localhost:11434
+```
+
+The Ollama prompt is intentionally defensive. It asks for:
+
+- Executive summary
+- Highest-risk hosts and services
+- Likely exposure and business impact
+- Safe validation checks
+- Recommended remediation actions ordered by priority
+- Follow-up evidence to collect
+
+Large reports are truncated before being sent to Ollama to avoid oversized local prompts.
 
 ## Output
 
