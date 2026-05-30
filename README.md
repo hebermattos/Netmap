@@ -22,6 +22,42 @@ sudo systemctl stop ollama
 OLLAMA_NO_GPU=1 ollama serve
 ```
 
+## Linux and sudo
+
+On Linux, Netmap runs Nmap as:
+
+```bash
+sudo -n nmap ...
+```
+
+The `-n` option makes sudo non-interactive. This prevents Netmap from hanging while waiting for a password.
+
+Before running Netmap, refresh your sudo session:
+
+```bash
+sudo -v
+```
+
+Then run Netmap normally:
+
+```bash
+dotnet run -- --network 192.168.0.0/24
+```
+
+To run Nmap without sudo:
+
+```bash
+dotnet run -- --network 192.168.0.0/24 --no-sudo-nmap
+```
+
+To explicitly force sudo:
+
+```bash
+dotnet run -- --network 192.168.0.0/24 --sudo-nmap
+```
+
+On Windows, sudo is not used.
+
 ## Usage
 
 Automatically detect the first local IPv4 network, scan the discovered hosts, and send the report to Ollama:
