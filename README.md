@@ -27,11 +27,25 @@ Limit the scan to specific ports:
 dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080
 ```
 
+Control how many hosts are analyzed in parallel:
+
+```bash
+dotnet run -- --network 192.168.0.0/24 --parallelism 5
+```
+
+You can combine the options:
+
+```bash
+dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080 --parallelism 3
+```
+
 You can also pass the network range as the first argument:
 
 ```bash
 dotnet run -- 192.168.0.0/24
 ```
+
+The default parallelism is `5`. Increase it carefully. Higher values run more Nmap processes at the same time and can make scans faster, but they also create more traffic and CPU usage.
 
 The `--vuln` and `--vulnerability-scan` flags are still accepted for backward compatibility, but they are no longer required because this scan mode is always enabled.
 
@@ -81,4 +95,4 @@ This section is intended to help confirm service configuration and collect techn
 
 ## Notes
 
-Use this tool only on networks and devices where you have authorization. Vulnerability-focused scans can be slower and more intrusive than regular service discovery.
+Use this tool only on networks and devices where you have authorization. Vulnerability-focused scans can be slower and more intrusive than regular service discovery. Parallel scans can amplify network traffic, so start with a low `--parallelism` value on small or sensitive networks.
