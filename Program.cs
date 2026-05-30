@@ -13,6 +13,7 @@ internal static class Program
     private const int DefaultParallelism = 5;
     private const int MaxOllamaReportCharacters = 60_000;
     private const string DefaultOllamaUrl = "http://localhost:11434";
+    private const string DefaultOllamaModel = "qwen2.5-coder:3b";
 
     private static readonly string[] TargetedValidationScripts =
     [
@@ -45,6 +46,9 @@ internal static class Program
 
         try
         {
+            if (options.HasOllamaAnalysis)
+                await EnsureOllamaIsAvailableAsync(options);
+
             EnsureNmapIsAvailable();
 
             Console.WriteLine("Discovering live hosts...");
@@ -114,6 +118,50 @@ internal static class Program
         return writer.ToString();
     }
 
+    private static async Task EnsureOllamaIsAvailableAsync(ScanOptions options)
+    {
+        Console.WriteLine($"Checking Ollama at {options.OllamaUrl}...");
+
+        try
+        {
+            using var httpClient = CreateOllamaHttpClient(options, TimeSpan.FromSeconds(10));
+            using var response = await httpClient.GetAsync("/api/tags");
+            var responseText = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(
+                    $"Ollama is reachable, but /api/tags returned HTTP {(int)response.StatusCode}: {responseText}");
+            }
+
+            var tags = System.Text.Json.JsonSerializer.Deserialize<OllamaTagsResponse>(responseText);
+            var modelFound = tags?.Models?.Any(model =>
+                string.Equals(model.Name, options.OllamaModel, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(model.Model, options.OllamaModel, StringComparison.OrdinalIgnoreCase)) == true;
+
+            if (!modelFound)
+            {
+                throw new InvalidOperationException(
+                    $"Ollama is available, but model '{options.OllamaModel}' was not found. Run: ollama pull {options.OllamaModel}");
+            }
+
+            Console.WriteLine($"Ollama is available and model '{options.OllamaModel}' is installed.");
+            Console.WriteLine();
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new InvalidOperationException(
+                $"Ollama is enabled but not reachable at {options.OllamaUrl}. Start it with 'ollama serve' or disable it with --no-ollama.",
+                ex);
+        }
+        catch (TaskCanceledException ex)
+        {
+            throw new InvalidOperationException(
+                $"Ollama availability check timed out at {options.OllamaUrl}. Disable it with --no-ollama if needed.",
+                ex);
+        }
+    }
+
     private static async Task RunOllamaDefensiveAnalysisAsync(ScanOptions options, string report)
     {
         Console.WriteLine("==================================================");
@@ -127,16 +175,11 @@ internal static class Program
         }
 
         var prompt = BuildDefensiveAnalysisPrompt(report);
-        var request = new OllamaGenerateRequest(options.OllamaModel!, prompt, Stream: false);
+        var request = new OllamaGenerateRequest(options.OllamaModel, prompt, Stream: false);
 
         try
         {
-            using var httpClient = new HttpClient
-            {
-                BaseAddress = new Uri(options.OllamaUrl),
-                Timeout = TimeSpan.FromMinutes(10)
-            };
-
+            using var httpClient = CreateOllamaHttpClient(options, TimeSpan.FromMinutes(10));
             using var response = await httpClient.PostAsJsonAsync("/api/generate", request);
             var responseText = await response.Content.ReadAsStringAsync();
 
@@ -165,6 +208,15 @@ internal static class Program
         {
             Console.WriteLine($"Ollama analysis timed out: {ex.Message}");
         }
+    }
+
+    private static HttpClient CreateOllamaHttpClient(ScanOptions options, TimeSpan timeout)
+    {
+        return new HttpClient
+        {
+            BaseAddress = new Uri(options.OllamaUrl),
+            Timeout = timeout
+        };
     }
 
     private static string BuildDefensiveAnalysisPrompt(string report)
@@ -770,20 +822,29 @@ internal static class Program
     private sealed record OllamaGenerateResponse(
         [property: JsonPropertyName("response")] string? Response);
 
+    private sealed record OllamaTagsResponse(
+        [property: JsonPropertyName("models")] IReadOnlyList<OllamaModelInfo>? Models);
+
+    private sealed record OllamaModelInfo(
+        [property: JsonPropertyName("name")] string? Name,
+        [property: JsonPropertyName("model")] string? Model);
+
     private sealed record ScanOptions(
         string NetworkRange,
         string? Ports,
         int Parallelism,
-        string? OllamaModel,
+        bool OllamaEnabled,
+        string OllamaModel,
         string OllamaUrl)
     {
-        public bool HasOllamaAnalysis => !string.IsNullOrWhiteSpace(OllamaModel);
+        public bool HasOllamaAnalysis => OllamaEnabled;
 
         public static ScanOptions Parse(string[] args)
         {
             string? networkRange = null;
             string? ports = null;
-            string? ollamaModel = null;
+            var ollamaEnabled = true;
+            var ollamaModel = DefaultOllamaModel;
             var ollamaUrl = DefaultOllamaUrl;
             var parallelism = DefaultParallelism;
 
@@ -805,10 +866,15 @@ internal static class Program
 
                     case "--ollama-model" when i + 1 < args.Length:
                         ollamaModel = args[++i];
+                        ollamaEnabled = true;
                         break;
 
                     case "--ollama-url" when i + 1 < args.Length:
                         ollamaUrl = NormalizeOllamaUrl(args[++i]);
+                        break;
+
+                    case "--no-ollama":
+                        ollamaEnabled = false;
                         break;
 
                     case "--vuln":
@@ -832,6 +898,7 @@ internal static class Program
                 networkRange ?? GetFirstLocalNetworkCidr(),
                 ports,
                 parallelism,
+                ollamaEnabled,
                 ollamaModel,
                 ollamaUrl);
         }
@@ -861,6 +928,7 @@ internal static class Program
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --parallelism 5");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ollama-model llama3.1");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ollama-url http://localhost:11434 --ollama-model llama3.1");
+            Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --no-ollama");
             Environment.Exit(0);
         }
     }
