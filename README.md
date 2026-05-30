@@ -1,16 +1,30 @@
 # Netmap
 
-C#/.NET 8 console app that discovers live hosts on the local network using Nmap, runs vulnerability-focused checks, collects targeted validation evidence for open services, and can optionally send the final report to a local Ollama model for defensive triage and remediation guidance.
+C#/.NET 8 console app that discovers live hosts on the local network using Nmap, runs vulnerability-focused checks, collects targeted validation evidence for open services, and sends the final report to a local Ollama model for defensive triage and remediation guidance.
 
 ## Requirements
 
 - .NET 8 SDK
 - Nmap installed and available in `PATH`
-- Optional: Ollama running locally when using `--ollama-model`
+- Ollama running locally
+- Default Ollama model installed: `qwen2.5-coder:3b`
+
+Install the default model:
+
+```bash
+ollama pull qwen2.5-coder:3b
+```
+
+If Ollama has GPU issues on your machine, run it in CPU mode:
+
+```bash
+sudo systemctl stop ollama
+OLLAMA_NO_GPU=1 ollama serve
+```
 
 ## Usage
 
-Automatically detect the first local IPv4 network and scan the discovered hosts:
+Automatically detect the first local IPv4 network, scan the discovered hosts, and send the report to Ollama:
 
 ```bash
 dotnet run
@@ -34,7 +48,7 @@ Control how many hosts are analyzed in parallel:
 dotnet run -- --network 192.168.0.0/24 --parallelism 5
 ```
 
-Send the completed scan report to a local Ollama model for defensive analysis:
+Use another local Ollama model:
 
 ```bash
 dotnet run -- --network 192.168.0.0/24 --ollama-model llama3.1
@@ -44,6 +58,12 @@ Use a custom Ollama URL:
 
 ```bash
 dotnet run -- --network 192.168.0.0/24 --ollama-url http://localhost:11434 --ollama-model llama3.1
+```
+
+Disable Ollama for a scan:
+
+```bash
+dotnet run -- --network 192.168.0.0/24 --no-ollama
 ```
 
 You can combine the options:
@@ -64,12 +84,33 @@ The `--vuln` and `--vulnerability-scan` flags are still accepted for backward co
 
 ## Ollama analysis
 
-When `--ollama-model` is provided, Netmap sends the generated Nmap report to Ollama after all host scans finish.
+Ollama is enabled by default. Before starting the Nmap scan, Netmap checks:
+
+- whether Ollama is reachable at the configured URL
+- whether the configured model is installed locally
 
 Default Ollama endpoint:
 
 ```text
 http://localhost:11434
+```
+
+Default Ollama model:
+
+```text
+qwen2.5-coder:3b
+```
+
+If the Ollama preflight check fails, Netmap stops before starting the scan and prints the fix, such as:
+
+```bash
+ollama pull qwen2.5-coder:3b
+```
+
+or:
+
+```bash
+ollama serve
 ```
 
 The Ollama prompt is intentionally defensive. It asks for:
