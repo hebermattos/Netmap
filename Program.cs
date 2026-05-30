@@ -69,7 +69,7 @@ internal static class Program
             Console.WriteLine();
 
             var consoleLock = new object();
-            var hostReports = new ConcurrentDictionary<string, string>();
+            var hostResults = new ConcurrentDictionary<string, HostScanResult>();
             var parallelOptions = new ParallelOptions
             {
                 MaxDegreeOfParallelism = options.Parallelism
@@ -77,22 +77,31 @@ internal static class Program
 
             await Parallel.ForEachAsync(hosts, parallelOptions, async (host, _) =>
             {
-                var report = await ScanHostAsync(host, options.Ports);
-                hostReports[host] = report;
+                var result = await ScanHostAsync(host, options.Ports);
+                hostResults[host] = result;
 
                 lock (consoleLock)
                 {
-                    Console.Write(report);
+                    Console.Write(result.Report);
                 }
             });
+
+            var orderedResults = hosts
+                .Select(host => hostResults.TryGetValue(host, out var result) ? result : null)
+                .Where(result => result is not null)
+                .Select(result => result!)
+                .ToList();
+
+            PrintFinalVulnerabilitySummary(orderedResults);
 
             if (options.HasOllamaAnalysis)
             {
                 var fullReport = string.Join(
                     Environment.NewLine,
-                    hosts.Select(host => hostReports.TryGetValue(host, out var report) ? report : string.Empty));
+                    orderedResults.Select(result => result.Report));
 
-                await RunOllamaDefensiveAnalysisAsync(options, fullReport);
+                var reportWithSummary = fullReport + Environment.NewLine + BuildFinalVulnerabilitySummaryText(orderedResults);
+                await RunOllamaDefensiveAnalysisAsync(options, reportWithSummary);
             }
         }
         catch (Exception ex)
@@ -102,7 +111,7 @@ internal static class Program
         }
     }
 
-    private static async Task<string> ScanHostAsync(string host, string? ports)
+    private static async Task<HostScanResult> ScanHostAsync(string host, string? ports)
     {
         using var writer = new StringWriter();
 
@@ -110,12 +119,82 @@ internal static class Program
         writer.WriteLine($"Scanning vulnerabilities on {host}");
         writer.WriteLine("==================================================");
 
-        var openPorts = await RunVulnerabilityScanAsync(host, ports, writer);
-        await RunTargetedValidationAsync(host, openPorts, writer);
+        var vulnerabilityResult = await RunVulnerabilityScanAsync(host, ports, writer);
+        await RunTargetedValidationAsync(host, vulnerabilityResult.OpenPorts, writer);
 
         writer.WriteLine();
 
+        return new HostScanResult(
+            host,
+            writer.ToString(),
+            vulnerabilityResult.OpenPorts,
+            vulnerabilityResult.Findings);
+    }
+
+    private static void PrintFinalVulnerabilitySummary(IReadOnlyList<HostScanResult> results)
+    {
+        Console.Write(BuildFinalVulnerabilitySummaryText(results));
+    }
+
+    private static string BuildFinalVulnerabilitySummaryText(IReadOnlyList<HostScanResult> results)
+    {
+        using var writer = new StringWriter();
+
+        writer.WriteLine("==================================================");
+        writer.WriteLine("Final vulnerability summary");
+        writer.WriteLine("==================================================");
+
+        var findings = results
+            .SelectMany(result => result.Findings)
+            .OrderBy(finding => ParseIpForOrdering(finding.IpAddress))
+            .ThenBy(finding => finding.PortLabel == "host" ? 0 : 1)
+            .ThenBy(finding => ParsePortForOrdering(finding.PortLabel))
+            .ThenBy(finding => finding.Status)
+            .ThenBy(finding => finding.ScriptId)
+            .ToList();
+
+        if (findings.Count == 0)
+        {
+            writer.WriteLine("No vulnerability findings were reported by Nmap vuln scripts.");
+            writer.WriteLine();
+            return writer.ToString();
+        }
+
+        foreach (var hostGroup in findings.GroupBy(finding => finding.IpAddress))
+        {
+            writer.WriteLine($"Host: {hostGroup.Key}");
+
+            foreach (var portGroup in hostGroup.GroupBy(finding => new
+            {
+                finding.Protocol,
+                finding.PortLabel,
+                finding.Service
+            }))
+            {
+                var location = portGroup.Key.PortLabel == "host"
+                    ? "host script"
+                    : $"{portGroup.Key.Protocol}/{portGroup.Key.PortLabel}";
+
+                writer.WriteLine($"  {location} - {portGroup.Key.Service}");
+
+                foreach (var finding in portGroup)
+                    writer.WriteLine($"    [{finding.Status}] {finding.ScriptId}: {FirstLineOrFallback(finding.Output, "No details provided.")}");
+            }
+
+            writer.WriteLine();
+        }
+
         return writer.ToString();
+    }
+
+    private static string FirstLineOrFallback(string text, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return fallback;
+
+        return text.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim())
+            .FirstOrDefault(line => !string.IsNullOrWhiteSpace(line)) ?? fallback;
     }
 
     private static async Task EnsureOllamaIsAvailableAsync(ScanOptions options)
@@ -234,7 +313,7 @@ internal static class Program
         prompt.AppendLine("5. Recommended remediation actions, ordered by priority");
         prompt.AppendLine("6. Follow-up evidence to collect");
         prompt.AppendLine();
-        prompt.AppendLine("Nmap report:");
+        prompt.AppendLine("Nmap report and final vulnerability summary:");
         prompt.AppendLine("```text");
         prompt.AppendLine(truncatedReport);
         prompt.AppendLine("```");
@@ -270,7 +349,7 @@ internal static class Program
         return ParseLiveHostsFromXml(result.Output);
     }
 
-    private static async Task<IReadOnlyList<OpenPortInfo>> RunVulnerabilityScanAsync(string host, string? ports, TextWriter writer)
+    private static async Task<VulnerabilityScanResult> RunVulnerabilityScanAsync(string host, string? ports, TextWriter writer)
     {
         var result = await RunNmapAsync(BuildVulnerabilityScanArguments(host, ports));
 
@@ -278,7 +357,7 @@ internal static class Program
         {
             writer.WriteLine("Nmap vulnerability scan failed.");
             WriteStderrIfPresent(result.Error, writer);
-            return [];
+            return new VulnerabilityScanResult([], []);
         }
 
         var findings = ParseVulnerabilityFindingsFromXml(result.Output)
@@ -292,7 +371,7 @@ internal static class Program
         PrintVulnerabilityFindings(host, findings, writer);
         WriteStderrIfPresent(result.Error, writer);
 
-        return openPorts;
+        return new VulnerabilityScanResult(openPorts, findings);
     }
 
     private static async Task RunTargetedValidationAsync(string host, IReadOnlyList<OpenPortInfo> openPorts, TextWriter writer)
@@ -790,6 +869,16 @@ internal static class Program
     }
 
     private sealed record NmapResult(int ExitCode, string Output, string Error);
+
+    private sealed record HostScanResult(
+        string Host,
+        string Report,
+        IReadOnlyList<OpenPortInfo> OpenPorts,
+        IReadOnlyList<VulnerabilityFinding> Findings);
+
+    private sealed record VulnerabilityScanResult(
+        IReadOnlyList<OpenPortInfo> OpenPorts,
+        IReadOnlyList<VulnerabilityFinding> Findings);
 
     private sealed record OpenPortInfo(
         string IpAddress,
