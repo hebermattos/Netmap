@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Serialization;
 using System.Xml.Linq;
@@ -14,6 +15,8 @@ internal static class Program
     private const int MaxOllamaReportCharacters = 60_000;
     private const string DefaultOllamaUrl = "http://localhost:11434";
     private const string DefaultOllamaModel = "qwen2.5-coder:3b";
+
+    private static bool useSudoForNmap;
 
     private static readonly string[] TargetedValidationScripts =
     [
@@ -35,10 +38,12 @@ internal static class Program
         Console.WriteLine();
 
         var options = ScanOptions.Parse(args);
+        useSudoForNmap = options.UseSudoForNmap;
 
         Console.WriteLine($"Network range: {options.NetworkRange}");
         Console.WriteLine($"Scan ports:    {(string.IsNullOrWhiteSpace(options.Ports) ? "default" : options.Ports)}");
         Console.WriteLine($"Parallelism:   {options.Parallelism}");
+        Console.WriteLine($"Nmap sudo:     {(options.UseSudoForNmap ? "enabled" : "disabled")}");
         Console.WriteLine($"Ollama:        {(options.HasOllamaAnalysis ? $"enabled ({options.OllamaModel})" : "disabled")}");
         Console.WriteLine("Vuln scan:     enabled");
         Console.WriteLine("Validation:    enabled");
@@ -336,7 +341,11 @@ internal static class Program
         var result = RunNmapAsync(["--version"]).GetAwaiter().GetResult();
 
         if (result.ExitCode != 0)
-            throw new InvalidOperationException("Nmap was not found or could not be executed. Install Nmap and make sure it is available in PATH.");
+        {
+            var command = useSudoForNmap ? "sudo -n nmap" : "nmap";
+            throw new InvalidOperationException(
+                $"Nmap was not found or could not be executed with '{command}'. Install Nmap and make sure it is available in PATH. On Linux with sudo enabled, run 'sudo -v' before Netmap or use --no-sudo-nmap.");
+        }
     }
 
     private static async Task<IReadOnlyList<string>> DiscoverHostsAsync(string networkRange)
@@ -459,19 +468,7 @@ internal static class Program
 
     private static async Task<NmapResult> RunNmapAsync(IReadOnlyCollection<string> arguments)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "nmap",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        foreach (var argument in arguments)
-            startInfo.ArgumentList.Add(argument);
-
-        using var process = new Process { StartInfo = startInfo };
+        using var process = new Process { StartInfo = CreateNmapStartInfo(arguments) };
 
         process.Start();
 
@@ -484,6 +481,34 @@ internal static class Program
             process.ExitCode,
             await outputTask,
             await errorTask);
+    }
+
+    private static ProcessStartInfo CreateNmapStartInfo(IReadOnlyCollection<string> arguments)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ShouldUseSudoForNmap() ? "sudo" : "nmap",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        if (ShouldUseSudoForNmap())
+        {
+            startInfo.ArgumentList.Add("-n");
+            startInfo.ArgumentList.Add("nmap");
+        }
+
+        foreach (var argument in arguments)
+            startInfo.ArgumentList.Add(argument);
+
+        return startInfo;
+    }
+
+    private static bool ShouldUseSudoForNmap()
+    {
+        return useSudoForNmap && !RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
     }
 
     private static IReadOnlyList<string> ParseLiveHostsFromXml(string xml)
@@ -924,7 +949,8 @@ internal static class Program
         int Parallelism,
         bool OllamaEnabled,
         string OllamaModel,
-        string OllamaUrl)
+        string OllamaUrl,
+        bool UseSudoForNmap)
     {
         public bool HasOllamaAnalysis => OllamaEnabled;
 
@@ -936,6 +962,7 @@ internal static class Program
             var ollamaModel = DefaultOllamaModel;
             var ollamaUrl = DefaultOllamaUrl;
             var parallelism = DefaultParallelism;
+            var useSudoForNmap = !RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
             for (var i = 0; i < args.Length; i++)
             {
@@ -966,6 +993,14 @@ internal static class Program
                         ollamaEnabled = false;
                         break;
 
+                    case "--sudo-nmap":
+                        useSudoForNmap = true;
+                        break;
+
+                    case "--no-sudo-nmap":
+                        useSudoForNmap = false;
+                        break;
+
                     case "--vuln":
                     case "--vulnerability-scan":
                         // Kept for backward compatibility. Vulnerability scanning is always enabled.
@@ -989,7 +1024,8 @@ internal static class Program
                 parallelism,
                 ollamaEnabled,
                 ollamaModel,
-                ollamaUrl);
+                ollamaUrl,
+                useSudoForNmap);
         }
 
         private static int ParseParallelism(string value)
@@ -1018,6 +1054,7 @@ internal static class Program
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ollama-model llama3.1");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ollama-url http://localhost:11434 --ollama-model llama3.1");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --no-ollama");
+            Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --no-sudo-nmap");
             Environment.Exit(0);
         }
     }
