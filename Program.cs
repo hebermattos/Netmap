@@ -6,6 +6,8 @@ using System.Xml.Linq;
 
 internal static class Program
 {
+    private const int DefaultParallelism = 5;
+
     private static readonly string[] TargetedValidationScripts =
     [
         "ssl-cert",
@@ -29,6 +31,7 @@ internal static class Program
 
         Console.WriteLine($"Network range: {options.NetworkRange}");
         Console.WriteLine($"Scan ports:    {(string.IsNullOrWhiteSpace(options.Ports) ? "default" : options.Ports)}");
+        Console.WriteLine($"Parallelism:   {options.Parallelism}");
         Console.WriteLine("Vuln scan:     enabled");
         Console.WriteLine("Validation:    enabled");
         Console.WriteLine();
@@ -51,18 +54,24 @@ internal static class Program
                 Console.WriteLine($" - {host}");
 
             Console.WriteLine();
+            Console.WriteLine($"Running host analysis with up to {options.Parallelism} parallel Nmap worker(s)...");
+            Console.WriteLine();
 
-            foreach (var host in hosts)
+            var consoleLock = new object();
+            var parallelOptions = new ParallelOptions
             {
-                Console.WriteLine("==================================================");
-                Console.WriteLine($"Scanning vulnerabilities on {host}");
-                Console.WriteLine("==================================================");
+                MaxDegreeOfParallelism = options.Parallelism
+            };
 
-                var openPorts = await RunVulnerabilityScanAsync(host, options.Ports);
-                await RunTargetedValidationAsync(host, openPorts);
+            await Parallel.ForEachAsync(hosts, parallelOptions, async (host, _) =>
+            {
+                var report = await ScanHostAsync(host, options.Ports);
 
-                Console.WriteLine();
-            }
+                lock (consoleLock)
+                {
+                    Console.Write(report);
+                }
+            });
         }
         catch (Exception ex)
         {
@@ -71,9 +80,25 @@ internal static class Program
         }
     }
 
+    private static async Task<string> ScanHostAsync(string host, string? ports)
+    {
+        using var writer = new StringWriter();
+
+        writer.WriteLine("==================================================");
+        writer.WriteLine($"Scanning vulnerabilities on {host}");
+        writer.WriteLine("==================================================");
+
+        var openPorts = await RunVulnerabilityScanAsync(host, ports, writer);
+        await RunTargetedValidationAsync(host, openPorts, writer);
+
+        writer.WriteLine();
+
+        return writer.ToString();
+    }
+
     private static void EnsureNmapIsAvailable()
     {
-        var result = RunNmapAsync(new[] { "--version" }).GetAwaiter().GetResult();
+        var result = RunNmapAsync(["--version"]).GetAwaiter().GetResult();
 
         if (result.ExitCode != 0)
             throw new InvalidOperationException("Nmap was not found or could not be executed. Install Nmap and make sure it is available in PATH.");
@@ -81,7 +106,7 @@ internal static class Program
 
     private static async Task<IReadOnlyList<string>> DiscoverHostsAsync(string networkRange)
     {
-        var result = await RunNmapAsync(new[] { "-sn", "-oX", "-", networkRange });
+        var result = await RunNmapAsync(["-sn", "-oX", "-", networkRange]);
 
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"Nmap discovery failed: {result.Error}");
@@ -89,14 +114,14 @@ internal static class Program
         return ParseLiveHostsFromXml(result.Output);
     }
 
-    private static async Task<IReadOnlyList<OpenPortInfo>> RunVulnerabilityScanAsync(string host, string? ports)
+    private static async Task<IReadOnlyList<OpenPortInfo>> RunVulnerabilityScanAsync(string host, string? ports, TextWriter writer)
     {
         var result = await RunNmapAsync(BuildVulnerabilityScanArguments(host, ports));
 
         if (result.ExitCode != 0)
         {
-            Console.WriteLine("Nmap vulnerability scan failed.");
-            WriteStderrIfPresent(result.Error);
+            writer.WriteLine("Nmap vulnerability scan failed.");
+            WriteStderrIfPresent(result.Error, writer);
             return [];
         }
 
@@ -108,19 +133,19 @@ internal static class Program
             .Where(port => port.IpAddress == host)
             .ToList();
 
-        PrintVulnerabilityFindings(host, findings);
-        WriteStderrIfPresent(result.Error);
+        PrintVulnerabilityFindings(host, findings, writer);
+        WriteStderrIfPresent(result.Error, writer);
 
         return openPorts;
     }
 
-    private static async Task RunTargetedValidationAsync(string host, IReadOnlyList<OpenPortInfo> openPorts)
+    private static async Task RunTargetedValidationAsync(string host, IReadOnlyList<OpenPortInfo> openPorts, TextWriter writer)
     {
-        Console.WriteLine("Targeted validation evidence:");
+        writer.WriteLine("Targeted validation evidence:");
 
         if (openPorts.Count == 0)
         {
-            Console.WriteLine($"  No open ports available for targeted validation on {host}.");
+            writer.WriteLine($"  No open ports available for targeted validation on {host}.");
             return;
         }
 
@@ -128,8 +153,8 @@ internal static class Program
 
         if (result.ExitCode != 0)
         {
-            Console.WriteLine("  Nmap targeted validation failed.");
-            WriteStderrIfPresent(result.Error);
+            writer.WriteLine("  Nmap targeted validation failed.");
+            WriteStderrIfPresent(result.Error, writer);
             return;
         }
 
@@ -137,8 +162,8 @@ internal static class Program
             .Where(item => item.IpAddress == host)
             .ToList();
 
-        PrintValidationEvidence(host, evidence);
-        WriteStderrIfPresent(result.Error);
+        PrintValidationEvidence(host, evidence, writer);
+        WriteStderrIfPresent(result.Error, writer);
     }
 
     private static string[] BuildVulnerabilityScanArguments(string host, string? ports)
@@ -420,7 +445,7 @@ internal static class Program
         return null;
     }
 
-    private static void PrintVulnerabilityFindings(string host, IReadOnlyList<VulnerabilityFinding> findings)
+    private static void PrintVulnerabilityFindings(string host, IReadOnlyList<VulnerabilityFinding> findings, TextWriter writer)
     {
         var hostFindings = findings
             .OrderBy(finding => finding.PortLabel == "host" ? 0 : 1)
@@ -430,7 +455,7 @@ internal static class Program
 
         if (hostFindings.Count == 0)
         {
-            Console.WriteLine($"No vulnerability findings reported by Nmap vuln scripts for {host}.");
+            writer.WriteLine($"No vulnerability findings reported by Nmap vuln scripts for {host}.");
             return;
         }
 
@@ -442,19 +467,19 @@ internal static class Program
             finding.Service
         }))
         {
-            Console.WriteLine($"{portGroup.Key.IpAddress} {portGroup.Key.Protocol}/{portGroup.Key.PortLabel} {portGroup.Key.Service}");
+            writer.WriteLine($"{portGroup.Key.IpAddress} {portGroup.Key.Protocol}/{portGroup.Key.PortLabel} {portGroup.Key.Service}");
 
             foreach (var finding in portGroup)
             {
-                Console.WriteLine($"  [{finding.Status}] {finding.ScriptId}");
-                WriteIndented(finding.Output, "    ");
+                writer.WriteLine($"  [{finding.Status}] {finding.ScriptId}");
+                WriteIndented(finding.Output, "    ", writer);
             }
 
-            Console.WriteLine();
+            writer.WriteLine();
         }
     }
 
-    private static void PrintValidationEvidence(string host, IReadOnlyList<ValidationEvidence> evidence)
+    private static void PrintValidationEvidence(string host, IReadOnlyList<ValidationEvidence> evidence, TextWriter writer)
     {
         var hostEvidence = evidence
             .OrderBy(item => ParsePortForOrdering(item.PortLabel))
@@ -463,7 +488,7 @@ internal static class Program
 
         if (hostEvidence.Count == 0)
         {
-            Console.WriteLine($"  No targeted validation evidence reported for {host}.");
+            writer.WriteLine($"  No targeted validation evidence reported for {host}.");
             return;
         }
 
@@ -475,15 +500,15 @@ internal static class Program
             item.Service
         }))
         {
-            Console.WriteLine($"{portGroup.Key.IpAddress} {portGroup.Key.Protocol}/{portGroup.Key.PortLabel} {portGroup.Key.Service}");
+            writer.WriteLine($"{portGroup.Key.IpAddress} {portGroup.Key.Protocol}/{portGroup.Key.PortLabel} {portGroup.Key.Service}");
 
             foreach (var item in portGroup)
             {
-                Console.WriteLine($"  [EVIDENCE] {item.ScriptId}");
-                WriteIndented(item.Output, "    ");
+                writer.WriteLine($"  [EVIDENCE] {item.ScriptId}");
+                WriteIndented(item.Output, "    ", writer);
             }
 
-            Console.WriteLine();
+            writer.WriteLine();
         }
     }
 
@@ -521,19 +546,19 @@ internal static class Program
             : output.Replace("\r\n", "\n").Trim();
     }
 
-    private static void WriteIndented(string text, string indentation)
+    private static void WriteIndented(string text, string indentation, TextWriter writer)
     {
         foreach (var line in text.Split('\n'))
-            Console.WriteLine($"{indentation}{line}");
+            writer.WriteLine($"{indentation}{line}");
     }
 
-    private static void WriteStderrIfPresent(string error)
+    private static void WriteStderrIfPresent(string error, TextWriter writer)
     {
         if (string.IsNullOrWhiteSpace(error))
             return;
 
-        Console.WriteLine("Nmap stderr:");
-        Console.WriteLine(error);
+        writer.WriteLine("Nmap stderr:");
+        writer.WriteLine(error);
     }
 
     private static uint ParseIpForOrdering(string ip)
@@ -633,12 +658,13 @@ internal static class Program
         string ScriptId,
         string Output);
 
-    private sealed record ScanOptions(string NetworkRange, string? Ports)
+    private sealed record ScanOptions(string NetworkRange, string? Ports, int Parallelism)
     {
         public static ScanOptions Parse(string[] args)
         {
             string? networkRange = null;
             string? ports = null;
+            var parallelism = DefaultParallelism;
 
             for (var i = 0; i < args.Length; i++)
             {
@@ -650,6 +676,10 @@ internal static class Program
 
                     case "--ports" when i + 1 < args.Length:
                         ports = args[++i];
+                        break;
+
+                    case "--parallelism" when i + 1 < args.Length:
+                        parallelism = ParseParallelism(args[++i]);
                         break;
 
                     case "--vuln":
@@ -671,7 +701,16 @@ internal static class Program
 
             return new ScanOptions(
                 networkRange ?? GetFirstLocalNetworkCidr(),
-                ports);
+                ports,
+                parallelism);
+        }
+
+        private static int ParseParallelism(string value)
+        {
+            if (int.TryParse(value, out var parallelism) && parallelism > 0)
+                return parallelism;
+
+            throw new ArgumentException("The --parallelism value must be a positive integer.");
         }
 
         private static void PrintHelpAndExit()
@@ -680,6 +719,7 @@ internal static class Program
             Console.WriteLine("  dotnet run");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24");
             Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --ports 80,443,2020,8899,9080");
+            Console.WriteLine("  dotnet run -- --network 192.168.0.0/24 --parallelism 5");
             Environment.Exit(0);
         }
     }
